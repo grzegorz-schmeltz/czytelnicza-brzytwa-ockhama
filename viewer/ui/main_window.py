@@ -126,6 +126,17 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
+        self.action_set_marker = QAction("🔖 Ustaw znacznik", self)
+        self.action_set_marker.setShortcut(QKeySequence("Ctrl+M"))
+        toolbar.addAction(self.action_set_marker)
+
+        self.action_go_to_marker = QAction("↩ Wróć do znacznika", self)
+        self.action_go_to_marker.setShortcut(QKeySequence("Ctrl+Shift+M"))
+        self.action_go_to_marker.setEnabled(False)
+        toolbar.addAction(self.action_go_to_marker)
+
+        toolbar.addSeparator()
+
         self.action_zoom_out = QAction("Pomniejsz (A-)", self)
         self.action_zoom_out.setShortcut(QKeySequence("Ctrl+-"))
         toolbar.addAction(self.action_zoom_out)
@@ -190,6 +201,8 @@ class MainWindow(QMainWindow):
         self.action_export_notes.triggered.connect(self._on_export_notes)
         self.action_prev.triggered.connect(self._on_prev_chapter)
         self.action_next.triggered.connect(self._on_next_chapter)
+        self.action_set_marker.triggered.connect(self._set_reading_marker)
+        self.action_go_to_marker.triggered.connect(self._go_to_reading_marker)
         self.action_zoom_in.triggered.connect(lambda: self._change_zoom(0.1))
         self.action_zoom_out.triggered.connect(lambda: self._change_zoom(-0.1))
         self.action_reload_now.triggered.connect(self.coordinator.trigger_manual_reload)
@@ -277,6 +290,7 @@ class MainWindow(QMainWindow):
 
         self.settings.setValue("last_opened_file", path)
         self.settings.setValue("last_annotation_file", resolved_annotations or "")
+        self._update_marker_action()
         logger.info("Otwarto plik EPUB: %s (tytuł: %s)", path, self.state.book.title if self.state.book else "?")
 
     def _on_export_notes(self) -> None:
@@ -461,6 +475,7 @@ class MainWindow(QMainWindow):
             if isinstance(anchor, dict):
                 self._pending_anchor = anchor
                 self._last_reading_anchor = anchor
+                self._store_reading_marker(anchor, automatic=True)
             _proceed_once()
 
         # Zabezpieczenie: gdyby z jakiegoś powodu runJavaScript() nigdy nie
@@ -599,6 +614,82 @@ class MainWindow(QMainWindow):
             self.settings.sync()
 
         self.web_view.capture_reading_anchor(_store)
+
+    def _marker_settings_key(self) -> str | None:
+        path = self.state.source_epub_path
+        if not path:
+            return None
+        return f"books/{self._book_settings_key(path)}/last_marker"
+
+    def _load_reading_marker(self) -> dict | None:
+        key = self._marker_settings_key()
+        if not key:
+            return None
+        raw = self.settings.value(key, None)
+        if not raw:
+            return None
+        try:
+            marker = json.loads(str(raw))
+        except (TypeError, ValueError):
+            logger.warning("Nie udało się odczytać znacznika książki.")
+            return None
+        if not isinstance(marker, dict):
+            return None
+        if not isinstance(marker.get("chapter_href"), str):
+            return None
+        if not isinstance(marker.get("anchor"), dict):
+            return None
+        return marker
+
+    def _store_reading_marker(self, anchor: dict, automatic: bool = False) -> bool:
+        key = self._marker_settings_key()
+        href = self.state.current_chapter_href()
+        if not key or not href or not isinstance(anchor, dict) or not anchor.get("found"):
+            return False
+        marker = {
+            "chapter_href": href,
+            "anchor": anchor,
+            "automatic": automatic,
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        self.settings.setValue(key, json.dumps(marker, ensure_ascii=False))
+        self.settings.sync()
+        self._update_marker_action()
+        return True
+
+    def _update_marker_action(self) -> None:
+        self.action_go_to_marker.setEnabled(self._load_reading_marker() is not None)
+
+    def _set_reading_marker(self) -> None:
+        if not self.state.source_epub_path:
+            QMessageBox.information(self, "Znacznik", "Najpierw otwórz książkę.")
+            return
+
+        def _save(anchor) -> None:
+            if self._store_reading_marker(anchor, automatic=False):
+                self.status_reload_time.setText("Znacznik zapisany")
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Znacznik",
+                    "Nie udało się rozpoznać widocznego fragmentu tekstu.",
+                )
+
+        self.web_view.capture_reading_anchor(_save)
+
+    def _go_to_reading_marker(self) -> None:
+        marker = self._load_reading_marker()
+        if not marker:
+            QMessageBox.information(self, "Znacznik", "Ta książka nie ma jeszcze zapisanego znacznika.")
+            self._update_marker_action()
+            return
+        href = marker["chapter_href"]
+        anchor = marker["anchor"]
+        if not self.state.go_to_href(href):
+            QMessageBox.warning(self, "Znacznik", "Rozdział zapisany w znaczniku nie jest już dostępny.")
+            return
+        self._display_current_chapter(restore_anchor=anchor)
+        self.status_reload_time.setText("Przywrócono znacznik")
 
     def _restore_book_position(self, path: str) -> dict | None:
         """Przywraca ostatni rozdział i zwraca zapisaną kotwicę przewinięcia."""

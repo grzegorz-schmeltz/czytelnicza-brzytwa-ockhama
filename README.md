@@ -68,6 +68,8 @@ opracowanie w osobnym pliku `.easyreader`. Nigdy nie zmienia źródłowego EPUB-
 - spis treści i nawigacja między rozdziałami;
 - powiększanie tekstu oraz jasny i ciemny motyw;
 - zapamiętywanie rozdziału i dokładnego miejsca czytania;
+- ręczny znacznik czytania oraz przycisk powrotu do ostatniego znacznika;
+- automatyczne zachowanie znacznika przed przeładowaniem objaśnień;
 - bezpieczne przeładowanie notatek;
 - eksport samych notatek do oddzielnego EPUB-a, bez tekstu książki.
 
@@ -91,4 +93,3 @@ Kod jest dostępny na warunkach GNU General Public License v3.0. Społeczny i
 edukacyjny cel projektu opisuje [`PUBLIC_BENEFIT.md`](PUBLIC_BENEFIT.md).
 
 Copyright © 2026 Grzegorz Schmeltz.
-
