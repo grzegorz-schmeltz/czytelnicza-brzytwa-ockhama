@@ -1,0 +1,38 @@
+# Środowisko i pliki Pythona
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Pliki generowane przez program
+.easyreader/
+.test-temp*/
+viewer/settings.ini
+viewer/reader_settings.ini
+viewer/logs/
+viewer/.test-temp*/
+build/
+dist/
+
+# Książki i prywatne materiały użytkownika
+books/*
+!books/.gitkeep
+*.epub
+*.pdf
+*.mobi
+*.azw
+*.azw3
+*.djvu
+*.easyreader
+
+# Typowe katalogi robocze easyReadera
+**/backups/
+**/temp/
+**/zrodlo/
+**/wygenerowane/
+
+# System i edytory
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
