@@ -75,6 +75,9 @@ stosuje zaakceptowane opracowanie do oddzielnej kopii roboczej EPUB-a; viewer
 może niezależnie korzystać z pliku `.easyreader`. Żaden z tych przepływów nie
 zmienia źródłowego EPUB-a.
 
+Pełny, dwujęzyczny opis używania ChatGPT/Codexa jako skryby i komentatora,
+wraz z przykładem pliku JSON, znajduje się w [`readMe.txt`](readMe.txt).
+
 ## Funkcje czytnika
 
 - spis treści i nawigacja między rozdziałami;
