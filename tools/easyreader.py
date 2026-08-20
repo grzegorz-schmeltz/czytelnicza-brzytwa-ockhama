@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import html
 import json
 import os
@@ -11,6 +10,7 @@ import shutil
 import subprocess
 import sys
 from tempfile import NamedTemporaryFile
+import time
 import unicodedata
 from urllib.parse import unquote
 import zipfile
@@ -18,34 +18,9 @@ from xml.etree import ElementTree as ET
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-VIEWER_ROOT = PROJECT_ROOT / "viewer"
-if str(VIEWER_ROOT) not in sys.path:
-    sys.path.insert(0, str(VIEWER_ROOT))
-
-from core.easyreader_annotations import (  # noqa: E402
-    append_annotation,
-    block_sha256,
-    block_text_sha256,
-    create_document,
-    load_document,
-    render_annotation,
-)
-
-BOOKS_ROOT = Path(
-    os.environ.get("EASYREADER_BOOKS_ROOT", PROJECT_ROOT / "books")
-).expanduser()
-DEFAULT_PROFILE = Path(
-    os.environ.get("EASYREADER_DEFAULT_PROFILE", PROJECT_ROOT / "profiles" / "default.md")
-).expanduser()
-STATE_ROOT = Path(
-    os.environ.get("EASYREADER_STATE_ROOT", PROJECT_ROOT / ".easyreader")
-).expanduser()
-ACTIVE_FILE = Path(
-    os.environ.get("EASYREADER_ACTIVE_FILE", STATE_ROOT / "active_book.txt")
-).expanduser()
-READER_LAUNCHER = Path(
-    os.environ.get("EASYREADER_READER_LAUNCHER", PROJECT_ROOT / "scripts" / "open_reader.bat")
-).expanduser()
+BOOKS_ROOT = PROJECT_ROOT / "ksiazki_robocze"
+DEFAULT_PROFILE = PROJECT_ROOT / "profil_czytania.md"
+ACTIVE_FILE = PROJECT_ROOT / "AKTYWNA_KSIAZKA.txt"
 
 READING_STYLE = """
 <style id="easyreader-reading-style" type="text/css">
@@ -117,7 +92,7 @@ def resolve_book(value: str | None) -> Path:
         fail("Nie wybrano aktywnej książki. Najpierw użyj init albo activate.")
     active = ACTIVE_FILE.read_text(encoding="utf-8").strip()
     if not active:
-        fail(f"Plik aktywnej książki jest pusty: {ACTIVE_FILE}")
+        fail("Plik AKTYWNA_KSIAZKA.txt jest pusty.")
     return Path(active).resolve()
 
 
@@ -265,7 +240,7 @@ def build_epub_from_text(source: Path, destination: Path) -> None:
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="book-id">easyreader-{slugify(source.stem)}</dc:identifier>
     <dc:title>{title}</dc:title><dc:language>pl</dc:language>
-    <meta property="dcterms:modified">{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}</meta>
+    <meta property="dcterms:modified">2026-08-01T00:00:00Z</meta>
   </metadata>
   <manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest>
   <spine><itemref idref="chapter"/></spine>
@@ -340,45 +315,48 @@ def command_init(args: argparse.Namespace) -> None:
     book_dir = BOOKS_ROOT / name
     if book_dir.exists() and any(book_dir.iterdir()) and not args.force:
         fail(f"Katalog książki już istnieje: {book_dir}")
+    (book_dir / "zrodlo").mkdir(parents=True, exist_ok=True)
     (book_dir / "temp" / "historia").mkdir(parents=True, exist_ok=True)
+    (book_dir / "backups").mkdir(parents=True, exist_ok=True)
 
+    source_copy = book_dir / "zrodlo" / source.name
+    shutil.copy2(source, source_copy)
+    normalized = book_dir / "zrodlo" / "zrodlo_znormalizowane.epub"
     if source.suffix.lower() == ".epub":
-        source_epub = source
+        shutil.copy2(source, normalized)
     elif source.suffix.lower() == ".pdf":
         calibre = find_calibre()
         print("Konwersja PDF do EPUB przez Calibre…")
-        generated_dir = book_dir / "wygenerowane"
-        generated_dir.mkdir(parents=True, exist_ok=True)
-        source_epub = generated_dir / "zrodlo_znormalizowane.epub"
         calibre_config = book_dir / "temp" / "calibre-config"
         calibre_config.mkdir(parents=True, exist_ok=True)
         calibre_env = os.environ.copy()
         calibre_env["CALIBRE_CONFIG_DIRECTORY"] = str(calibre_config)
         subprocess.run(
-            [str(calibre), str(source), str(source_epub)],
+            [str(calibre), str(source_copy), str(normalized)],
             check=True,
             cwd=book_dir,
             env=calibre_env,
         )
     else:
-        generated_dir = book_dir / "wygenerowane"
-        generated_dir.mkdir(parents=True, exist_ok=True)
-        source_epub = generated_dir / "zrodlo_znormalizowane.epub"
-        build_epub_from_text(source, source_epub)
+        build_epub_from_text(source_copy, normalized)
 
-    errors = validate_epub(source_epub)
+    errors = validate_epub(normalized)
     if errors:
         fail("Nie udało się utworzyć poprawnego EPUB-a:\n" + "\n".join(errors))
 
-    annotation_file = book_dir / f"{name}.easyreader"
-    create_document(annotation_file, source_epub, title=source.stem)
-    _, spine = rootfile_and_spine(source_epub)
+    working = book_dir / f"{name}_easyReader.epub"
+    shutil.copy2(normalized, working)
+    inject_reading_style(working)
+    errors = validate_epub(working)
+    if errors:
+        fail("Kopia robocza EPUB jest niepoprawna:\n" + "\n".join(errors))
+    _, spine = rootfile_and_spine(normalized)
     state = {
-        "format": 2,
+        "format": 1,
         "name": name,
-        "source_original": str(source),
-        "source_epub": str(source_epub),
-        "annotations_file": str(annotation_file),
+        "source_original": str(source_copy),
+        "source_epub": str(normalized),
+        "working_epub": str(working),
         "spine": spine,
         "cursor": {"section": 0, "raw_block": 0},
         "pending": None,
@@ -387,7 +365,6 @@ def command_init(args: argparse.Namespace) -> None:
         "history": [],
     }
     save_json(book_dir / "postep.json", state)
-    STATE_ROOT.mkdir(parents=True, exist_ok=True)
     ACTIVE_FILE.write_text(str(book_dir), encoding="utf-8")
     shutil.copy2(DEFAULT_PROFILE, book_dir / "profil_czytania.md")
     (book_dir / "notatki_czytelnika.md").write_text(
@@ -396,31 +373,89 @@ def command_init(args: argparse.Namespace) -> None:
     launcher = book_dir / "Otworz_w_Podgladzie.bat"
     launcher.write_text(
         "@echo off\n"
-        f'call "{READER_LAUNCHER}" "{source_epub}" "{annotation_file}"\n',
+        f'call "{PROJECT_ROOT}\\viewer\\Otworz_plik.bat" "{working}"\n',
         encoding="utf-8",
     )
     print(f"Katalog książki: {book_dir}")
-    print(f"Oryginał otwierany tylko do odczytu: {source_epub}")
-    print(f"Osobny plik notatek: {annotation_file}")
+    print(f"Kopia do czytania: {working}")
 
 
-def command_next(args: argparse.Namespace) -> None:
-    book_dir = resolve_book(args.book)
-    state = load_state(book_dir)
-    if state.get("pending"):
-        print("Bieżący fragment czeka już na opracowanie:")
-        print(book_dir / "temp" / "fragment_biezacy.txt")
-        return
-    source_epub = Path(state["source_epub"])
-    section_index = int(state["cursor"]["section"])
-    raw_cursor = int(state["cursor"]["raw_block"])
-    selected = []
-    selected_section = None
+class UncertainEndOfBook(RuntimeError):
+    """Skan nie znalazł kandydata, ale napotkał błędy odczytu/dekodowania po
+    drodze - wynik jest NIEPEWNY (patrz zgłoszenie: to samo wywołanie na tym
+    samym, niezmienionym stanie i pliku bywało niedeterministyczne - raz
+    zwracało fałszywy koniec książki, raz poprawny fragment). W przeciwieństwie
+    do potwierdzonego końca książki (`print` + normalny powrót, kod wyjścia 0),
+    to wyjątek - `main()` kończy program osobnym kodem wyjścia (3), żeby
+    wywołujący mógł programowo odróżnić "na pewno koniec" od "spróbuj ponownie"."""
 
-    with zipfile.ZipFile(source_epub) as archive:
-        while section_index < len(state["spine"]):
-            section = state["spine"][section_index]
-            document = archive.read(section).decode("utf-8", errors="replace")
+
+NEXT_SCAN_ATTEMPTS = 3
+NEXT_SCAN_RETRY_DELAY_S = 0.3
+
+
+class _ScanResult:
+    """Wynik JEDNEJ próby przeszukania książki od danego kursora."""
+
+    def __init__(self) -> None:
+        self.selected: list[dict] = []
+        self.selected_section: str | None = None
+        self.selected_section_index: int | None = None
+        self.section_diagnostics: list[dict] = []
+        self.errors: list[tuple[str | None, Exception]] = []
+
+
+def _scan_for_next_fragment(
+    source_epub: Path,
+    spine: list[str],
+    section_index: int,
+    raw_cursor: int,
+    chars_limit: int,
+) -> _ScanResult:
+    """Pojedyncza próba przeszukania książki od podanego kursora w
+    poszukiwaniu kolejnego fragmentu.
+
+    Jeśli `result.errors` jest niepuste, wynik (włącznie z ewentualnym
+    brakiem kandydatów) jest NIEPEWNY - odczyt lub dekodowanie części
+    dokumentu się nie powiodło (np. przejściowy problem z dostępem do pliku:
+    blokada przez antywirusa, chmurowa synchronizacja z "plikami na żądanie"
+    itp. - wszystkie objawiają się podobnie: plik technicznie istnieje, ale
+    pojedynczy odczyt bywa niepełny albo chwilowo się nie udaje). Taką próbę
+    należy powtórzyć, zanim uzna się ją za rozstrzygającą - patrz
+    `command_next`, które wywołuje tę funkcję do `NEXT_SCAN_ATTEMPTS` razy.
+    """
+    result = _ScanResult()
+    try:
+        archive = zipfile.ZipFile(source_epub)
+    except (zipfile.BadZipFile, OSError) as exc:
+        result.errors.append((None, exc))
+        return result
+
+    try:
+        bad_member = archive.testzip()
+        if bad_member is not None:
+            result.errors.append((bad_member, RuntimeError(f"uszkodzony element archiwum: {bad_member}")))
+            return result
+
+        while section_index < len(spine):
+            section = spine[section_index]
+            try:
+                raw_bytes = archive.read(section)
+            except (KeyError, OSError, zipfile.BadZipFile) as exc:
+                result.errors.append((section, exc))
+                section_index += 1
+                raw_cursor = 0
+                continue
+
+            try:
+                document = raw_bytes.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as exc:
+                # "strict" celowo: "replace" mogłoby ukryć niepełny/uszkodzony
+                # odczyt jako pozornie poprawny (ale okaleczony) tekst. Mierzymy
+                # i tak (z "replace"), ale oznaczamy próbę jako niepewną.
+                document = raw_bytes.decode("utf-8", errors="replace")
+                result.errors.append((section, exc))
+
             all_matches = list(BLOCK_RE.finditer(document))
             candidates = []
             for raw_index, match in enumerate(all_matches):
@@ -438,27 +473,126 @@ def command_next(args: argparse.Namespace) -> None:
                         "text": text,
                     }
                 )
+            result.section_diagnostics.append(
+                {
+                    "section": section,
+                    "section_index": section_index,
+                    "raw_cursor": raw_cursor,
+                    "block_re_matches": len(all_matches),
+                    "candidates": len(candidates),
+                }
+            )
             if candidates:
-                selected_section = section
+                result.selected_section = section
+                result.selected_section_index = section_index
                 total = 0
                 for item in candidates:
                     # Jeden fragment ma odpowiadać jednemu naturalnemu ustępowi.
                     # Pierwszy śródtytuł należy do fragmentu, kolejny rozpoczyna następny.
-                    if selected and is_section_heading(item):
+                    if result.selected and is_section_heading(item):
                         break
-                    if selected and total + len(item["text"]) > args.chars:
+                    if result.selected and total + len(item["text"]) > chars_limit:
                         break
-                    selected.append(item)
+                    result.selected.append(item)
                     total += len(item["text"])
-                    if total >= args.chars:
+                    if total >= chars_limit:
                         break
                 break
             section_index += 1
             raw_cursor = 0
+    finally:
+        archive.close()
+    return result
 
-    if not selected or selected_section is None:
-        print("Koniec książki — nie znaleziono następnego fragmentu.")
+
+
+def command_next(args: argparse.Namespace) -> None:
+    book_dir = resolve_book(args.book)
+    state = load_state(book_dir)
+    if state.get("pending"):
+        print("Bieżący fragment czeka już na opracowanie:")
+        print(book_dir / "temp" / "fragment_biezacy.txt")
         return
+    source_epub = Path(state["source_epub"])
+    cursor_before = dict(state["cursor"])
+    section_index = int(state["cursor"]["section"])
+    raw_cursor = int(state["cursor"]["raw_block"])
+
+    # Zgłoszony problem: to samo wywołanie, na tym samym niezmienionym
+    # stanie i pliku, bywało niedeterministyczne - raz zwracało fałszywy
+    # koniec książki, raz poprawny fragment (typowy objaw przejściowego
+    # problemu z dostępem do pliku, np. blokady antywirusa albo chmurowej
+    # synchronizacji "na żądanie" - plik technicznie istnieje, ale
+    # pojedynczy odczyt bywa niepełny). Zamiast ufać JEDNEJ próbie,
+    # skanujemy do `NEXT_SCAN_ATTEMPTS` razy: sukces (znaleziony kandydat)
+    # kończy natychmiast; "koniec książki" uznajemy za potwierdzony dopiero
+    # po DWÓCH KOLEJNYCH próbach BEZ żadnych błędów odczytu, które ZGODNIE
+    # nie znalazły kandydata.
+    last_result: _ScanResult | None = None
+    consecutive_clean_empty = 0
+    attempts_made = 0
+    for attempt in range(1, NEXT_SCAN_ATTEMPTS + 1):
+        attempts_made = attempt
+        last_result = _scan_for_next_fragment(source_epub, state["spine"], section_index, raw_cursor, args.chars)
+        if last_result.selected:
+            break
+        if last_result.errors:
+            consecutive_clean_empty = 0
+        else:
+            consecutive_clean_empty += 1
+            if consecutive_clean_empty >= 2:
+                break
+        if attempt < NEXT_SCAN_ATTEMPTS:
+            time.sleep(NEXT_SCAN_RETRY_DELAY_S)
+
+    assert last_result is not None  # pętla wykonuje się co najmniej raz
+
+    if not last_result.selected:
+        confirmed = not last_result.errors and consecutive_clean_empty >= 2
+        print(
+            "Koniec książki — nie znaleziono następnego fragmentu."
+            if confirmed
+            else "NIEPEWNY WYNIK: nie udało się jednoznacznie potwierdzić końca książki "
+            "(napotkano błędy odczytu pliku źródłowego)."
+        )
+        print("— Diagnostyka —")
+        print(f"  Książka (katalog): {book_dir}")
+        print(f"  Źródłowy EPUB: {source_epub}")
+        print(f"  Liczba dokumentów w spine: {len(state['spine'])}")
+        print(f"  Kursor przed przeszukaniem: sekcja {cursor_before['section']}, blok {cursor_before['raw_block']}")
+        print(
+            f"  Liczba prób skanowania: {attempts_made} "
+            f"(potwierdzone czyste próby pod rząd: {consecutive_clean_empty})"
+        )
+        total_candidates = sum(entry["candidates"] for entry in last_result.section_diagnostics)
+        print(f"  Przeszukano dokumentów spine (od kursora): {len(last_result.section_diagnostics)}")
+        print(f"  Kandydatów znalezionych od kursora: {total_candidates}")
+        for entry in last_result.section_diagnostics:
+            print(
+                f"    sekcja={entry['section']!r} section_index={entry['section_index']} "
+                f"raw_cursor={entry['raw_cursor']} dopasowań_BLOCK_RE={entry['block_re_matches']} "
+                f"kandydatów={entry['candidates']}"
+            )
+        if last_result.errors:
+            print("  Błędy/ostrzeżenia odczytu w ostatniej próbie:")
+            for section, exc in last_result.errors:
+                print(f"    {section!r}: {type(exc).__name__}: {exc}")
+        if not args.book and ACTIVE_FILE.exists():
+            print(
+                f"  UWAGA: książka nie została podana jawnie - użyto aktywnej "
+                f"książki z {ACTIVE_FILE}: {ACTIVE_FILE.read_text(encoding='utf-8').strip()}"
+            )
+            print("  Jeśli spodziewałeś się innej książki, podaj jawnie: easyreader.py next <ścieżka_katalogu>")
+        if not confirmed:
+            raise UncertainEndOfBook(
+                "Skanowanie zakończyło się niepewnym wynikiem po napotkaniu błędów odczytu - "
+                "spróbuj ponownie (stan nie został zmieniony)."
+            )
+        return
+
+    selected = last_result.selected
+    selected_section = last_result.selected_section
+    section_index = last_result.selected_section_index
 
     last = selected[-1]
     identical_before = sum(
@@ -575,7 +709,9 @@ def command_apply(args: argparse.Namespace) -> None:
     data = json.loads(data_path.read_text(encoding="utf-8"))
     if data.get("fragment_id") != pending["id"]:
         fail("Identyfikator opracowania nie pasuje do bieżącego fragmentu.")
-    chosen = pending["blocks"][-1]
+    annotation = build_annotation(data, pending["id"])
+    anchor = pending["anchor_raw_html"]
+    anchor_occurrence = int(pending["anchor_occurrence"])
     next_cursor = pending["next_cursor"]
     if data.get("apply_through_raw_index") is not None:
         raw_index = int(data["apply_through_raw_index"])
@@ -585,36 +721,43 @@ def command_apply(args: argparse.Namespace) -> None:
         )
         if not chosen:
             fail("Wybrana granica opracowania nie należy do bieżącego fragmentu.")
+        source_epub = Path(state["source_epub"])
+        with zipfile.ZipFile(source_epub) as source_archive:
+            source_document = source_archive.read(pending["section"]).decode(
+                "utf-8", errors="replace"
+            )
+        source_raw = [m.group(0) for m in BLOCK_RE.finditer(source_document)]
+        if raw_index < 0 or raw_index >= len(source_raw):
+            fail("Wybrana granica opracowania wykracza poza bieżący dokument EPUB-a.")
+        # Korekta OCR może zmienić HTML punktu zaczepienia już po pobraniu
+        # fragmentu. Używaj jego aktualnej postaci z zachowaniem tego samego
+        # indeksu bloku, zamiast nieaktualnej kopii zapisanej w pending.
+        anchor = source_raw[raw_index]
+        anchor_occurrence = sum(
+            1 for raw in source_raw[: raw_index + 1] if raw == anchor
+        )
         next_cursor = {
             "section": pending["section_index"],
             "raw_block": raw_index + 1,
         }
-    content = {
-        key: data.get(key, [] if key == "objasnienia" else "")
-        for key in (
-            "modernizacja",
-            "prosty_jezyk",
-            "objasnienia",
-            "komentarz_ai",
-            "notatka_czytelnika",
-        )
-    }
-    annotation_record = {
-        "id": pending["id"],
-        "target": {
-            "section": pending["section"],
-            "raw_index": int(chosen["raw_index"]),
-            "block_sha256": block_sha256(chosen["raw_html"]),
-            "block_text_sha256": block_text_sha256(chosen["raw_html"]),
-        },
-        "content": content,
-    }
-    # Walidujemy treść przed zapisem. render_annotation zgłosi czytelny błąd,
-    # jeżeli wszystkie pola opracowania są puste.
-    render_annotation(annotation_record)
-    source_epub = Path(state["source_epub"])
-    annotations_file = Path(state["annotations_file"])
-    append_annotation(annotations_file, source_epub, annotation_record)
+    working = Path(state["working_epub"])
+    section = pending["section"]
+    with zipfile.ZipFile(working) as archive:
+        document = archive.read(section).decode("utf-8", errors="replace")
+    if f'data-easyreader-id="{pending["id"]}"' in document:
+        fail("Ten fragment został już dodany do książki.")
+    position = nth_find(document, anchor, anchor_occurrence)
+    if position < 0:
+        fail("Nie odnaleziono fragmentu źródłowego w kopii roboczej EPUB-a.")
+    insert_at = position + len(anchor)
+    document = document[:insert_at] + annotation + document[insert_at:]
+    backup = book_dir / "backups" / f'{pending["id"]}_przed_zmiana.epub'
+    shutil.copy2(working, backup)
+    zip_replace(working, {section: document.encode("utf-8")})
+    errors = validate_epub(working)
+    if errors:
+        shutil.copy2(backup, working)
+        fail("Zmiana została cofnięta, ponieważ EPUB jest niepoprawny:\n" + "\n".join(errors))
     history_dir = book_dir / "temp" / "historia"
     history_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(book_dir / "temp" / "fragment_biezacy.txt", history_dir / f'{pending["id"]}_oryginal.txt')
@@ -622,12 +765,12 @@ def command_apply(args: argparse.Namespace) -> None:
     state["cursor"] = next_cursor
     state["applied"] += 1
     state["history"].append(
-        {"id": pending["id"], "status": "applied", "section": pending["section"]}
+        {"id": pending["id"], "status": "applied", "section": section}
     )
     state["pending"] = None
     save_json(book_dir / "postep.json", state)
-    print(f"Dodano {pending['id']} do pliku notatek: {annotations_file}")
-    print("Oryginalny EPUB nie został zmieniony.")
+    print(f"Dodano {pending['id']} do {working}")
+    print(f"Kopia bezpieczeństwa: {backup}")
 
 
 def command_skip(args: argparse.Namespace) -> None:
@@ -671,13 +814,15 @@ def command_status(args: argparse.Namespace) -> None:
     book_dir = resolve_book(args.book)
     state = load_state(book_dir)
     result = {
+        "book_dir": str(book_dir),
         "name": state["name"],
-        "source_epub": state["source_epub"],
-        "annotations_file": state.get("annotations_file"),
+        "source_epub": state.get("source_epub"),
+        "working_epub": state["working_epub"],
         "cursor": state["cursor"],
         "applied": state["applied"],
         "skipped": state["skipped"],
         "pending": state["pending"]["id"] if state.get("pending") else None,
+        "resolved_from": "argument" if args.book else "AKTYWNA_KSIAZKA.txt",
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -693,7 +838,6 @@ def command_validate(args: argparse.Namespace) -> None:
 def command_activate(args: argparse.Namespace) -> None:
     book_dir = Path(args.book).expanduser().resolve()
     load_state(book_dir)
-    STATE_ROOT.mkdir(parents=True, exist_ok=True)
     ACTIVE_FILE.write_text(str(book_dir), encoding="utf-8")
     print(f"Aktywna książka: {book_dir}")
 
@@ -707,109 +851,10 @@ def command_list(args: argparse.Namespace) -> None:
         print(f"{marker} {path}")
 
 
-def command_migrate(args: argparse.Namespace) -> None:
-    """Przenosi komentarze ze starej trwałej kopii EPUB do `.easyreader`.
-
-    Stary EPUB i jego kopie bezpieczeństwa pozostają nietknięte jako punkt
-    powrotu. Po udanej migracji dalsza praca korzysta już z oryginału oraz
-    osobnego pliku notatek.
-    """
-    book_dir = resolve_book(args.book)
-    state = load_state(book_dir)
-    if int(state.get("format", 1)) >= 2 and state.get("annotations_file"):
-        print(f"Książka korzysta już z pliku: {state['annotations_file']}")
-        return
-    source_epub = Path(state["source_epub"])
-    working_epub = Path(state.get("working_epub", ""))
-    if not source_epub.is_file() or not working_epub.is_file():
-        fail("Migracja wymaga źródłowego EPUB-a i dotychczasowej kopii roboczej.")
-
-    annotation_file = book_dir / f"{state['name']}.easyreader"
-    if not annotation_file.exists():
-        create_document(annotation_file, source_epub, title=state["name"])
-    existing_ids = {str(item.get("id")) for item in load_document(annotation_file)["annotations"]}
-
-    proposals = book_dir / "temp" / "historia"
-    migrated = 0
-    with zipfile.ZipFile(source_epub) as source_archive, zipfile.ZipFile(working_epub) as working_archive:
-        for entry in state.get("history", []):
-            if entry.get("status") != "applied":
-                continue
-            fragment_id = str(entry["id"])
-            if fragment_id in existing_ids:
-                continue
-            section = str(entry["section"])
-            proposal_path = proposals / f"{fragment_id}_opracowanie.json"
-            if not proposal_path.is_file():
-                fail(f"Brak zachowanego opracowania: {proposal_path}")
-            data = json.loads(proposal_path.read_text(encoding="utf-8"))
-            source_document = source_archive.read(section).decode("utf-8", errors="replace")
-            working_document = working_archive.read(section).decode("utf-8", errors="replace")
-
-            aside_pattern = re.compile(
-                rf'<aside\b[^>]*data-easyreader-id=["\']{re.escape(fragment_id)}["\'][^>]*>.*?</aside\s*>',
-                re.IGNORECASE | re.DOTALL,
-            )
-            aside_match = aside_pattern.search(working_document)
-            if not aside_match:
-                fail(f"Nie znaleziono {fragment_id} w starej kopii roboczej EPUB-a.")
-            source_blocks = [match.group(0) for match in BLOCK_RE.finditer(source_document)]
-            source_index_by_raw: dict[str, list[int]] = {}
-            for index, raw in enumerate(source_blocks):
-                source_index_by_raw.setdefault(raw, []).append(index)
-            preceding = [match.group(0) for match in BLOCK_RE.finditer(working_document[: aside_match.start()])]
-            anchor_raw = next((raw for raw in reversed(preceding) if raw in source_index_by_raw), None)
-            if anchor_raw is None:
-                fail(f"Nie udało się odtworzyć miejsca dla {fragment_id}.")
-            raw_index = source_index_by_raw[anchor_raw][-1]
-            content = {
-                key: data.get(key, [] if key == "objasnienia" else "")
-                for key in (
-                    "modernizacja",
-                    "prosty_jezyk",
-                    "objasnienia",
-                    "komentarz_ai",
-                    "notatka_czytelnika",
-                )
-            }
-            record = {
-                "id": fragment_id,
-                "target": {
-                    "section": section,
-                    "raw_index": raw_index,
-                    "block_sha256": block_sha256(anchor_raw),
-                    "block_text_sha256": block_text_sha256(anchor_raw),
-                },
-                "content": content,
-            }
-            render_annotation(record)
-            append_annotation(annotation_file, source_epub, record)
-            existing_ids.add(fragment_id)
-            migrated += 1
-
-    backup_state = book_dir / "postep_format1_backup.json"
-    if not backup_state.exists():
-        shutil.copy2(book_dir / "postep.json", backup_state)
-    state["format"] = 2
-    state["annotations_file"] = str(annotation_file)
-    state["legacy_working_epub"] = state.pop("working_epub", str(working_epub))
-    save_json(book_dir / "postep.json", state)
-    launcher = book_dir / "Otworz_w_Podgladzie.bat"
-    launcher.write_text(
-        "@echo off\n"
-        f'call "{READER_LAUNCHER}" "{source_epub}" "{annotation_file}"\n',
-        encoding="utf-8",
-    )
-    print(f"Przeniesiono opracowania: {migrated}")
-    print(f"Plik notatek: {annotation_file}")
-    print(f"Kopia starego stanu: {backup_state}")
-    print("Stary opracowany EPUB nie został usunięty.")
-
-
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description="Czytelnicza Brzytwa Ockhama")
     sub = root.add_subparsers(dest="command", required=True)
-    init = sub.add_parser("init", help="Utwórz zewnętrzny plik notatek do książki")
+    init = sub.add_parser("init", help="Utwórz nową książkę roboczą")
     init.add_argument("source")
     init.add_argument("--name")
     init.add_argument("--force", action="store_true")
@@ -818,7 +863,7 @@ def parser() -> argparse.ArgumentParser:
     nxt.add_argument("book", nargs="?")
     nxt.add_argument("--chars", type=int, default=1600)
     nxt.set_defaults(func=command_next)
-    apply = sub.add_parser("apply", help="Dodaj opracowanie do pliku .easyreader")
+    apply = sub.add_parser("apply", help="Dodaj opracowanie do EPUB-a")
     apply.add_argument("book", nargs="?")
     apply.add_argument("--data")
     apply.set_defaults(func=command_apply)
@@ -841,9 +886,6 @@ def parser() -> argparse.ArgumentParser:
     activate.set_defaults(func=command_activate)
     listing = sub.add_parser("list", help="Pokaż rozpoczęte książki")
     listing.set_defaults(func=command_list)
-    migrate = sub.add_parser("migrate", help="Przenieś starą kopię roboczą do pliku .easyreader")
-    migrate.add_argument("book", nargs="?")
-    migrate.set_defaults(func=command_migrate)
     return root
 
 
@@ -852,6 +894,14 @@ def main() -> int:
         args = parser().parse_args()
         args.func(args)
         return 0
+    except UncertainEndOfBook as exc:
+        # Osobny kod wyjścia (3): "next" napotkało błędy odczytu i NIE może
+        # potwierdzić, czy to naprawdę koniec książki - w odróżnieniu od
+        # kodu 0 (potwierdzony koniec albo sukces) i kodu 1 (twardy błąd).
+        # Patrz zgłoszenie: dotąd kod wyjścia 0 nie pozwalał wywołującemu
+        # odróżnić prawdziwego końca od tej niepewnej sytuacji.
+        print(f"[NIEPEWNY KONIEC] {exc}", file=sys.stderr)
+        return 3
     except Exception as exc:
         print(f"[BŁĄD] {exc}", file=sys.stderr)
         return 1

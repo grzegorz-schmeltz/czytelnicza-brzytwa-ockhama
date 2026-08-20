@@ -14,9 +14,30 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu --no-sandbox")
 os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 
+from PySide6.QtCore import QEventLoop, QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from tests.epub_builder import build_epub3  # noqa: E402
+
+
+def close_and_wait(window, timeout_ms: int = 1500) -> None:
+    """`MainWindow.closeEvent` teraz odracza faktyczne zamknięcie (żeby
+    zdążyć asynchronicznie zapisać precyzyjną pozycję czytania - patrz
+    punkt 5 zgłoszenia), więc samo `window.close()` już nie wystarcza -
+    trzeba jeszcze przepompować pętlę zdarzeń, aż zamknięcie się dopełni."""
+    window.close()
+    loop = QEventLoop()
+
+    def _check():
+        if getattr(window, "_close_confirmed", False):
+            loop.quit()
+
+    poll = QTimer()
+    poll.timeout.connect(_check)
+    poll.start(20)
+    QTimer.singleShot(timeout_ms, loop.quit)
+    if not getattr(window, "_close_confirmed", False):
+        loop.exec()
 
 
 def main() -> int:
@@ -53,13 +74,13 @@ def main() -> int:
     assert window.coordinator.is_watching(), "Watcher powinien byc aktywny po otwarciu pliku"
     print("[6/7] Watchdog aktywnie obserwuje plik.")
 
-    window.close()
+    close_and_wait(window)
 
     reopened_window = MainWindow()
     reopened_window.open_epub(str(epub_path))
     assert reopened_window.state.current_chapter_href() == "chap2.xhtml"
     print("[7/7] Po ponownym otwarciu przywrocono ostatni rozdzial.")
-    reopened_window.close()
+    close_and_wait(reopened_window)
     app.quit()
 
     print("\nWSZYSTKIE SPRAWDZENIA DYMNE ZAKONCZONE SUKCESEM.")

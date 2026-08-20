@@ -14,10 +14,14 @@ Nie dodawaj i nie proponuj w tym projekcie:
 - trybu autora lub narzędzi redakcyjnych;
 - rozpakowywania książki do trwałej edycji;
 - składania zmodyfikowanego EPUB-a;
-- OCR, obsługi kamery lub importowania zdjęć stron;
+- automatycznego OCR, obsługi kamery lub importowania zdjęć stron;
 - funkcji wymagających od czytelnika znajomości HTML, XHTML albo CSS.
 
 Takie zadania należą wyłącznie do prywatnego Warsztatu Autora.
+
+Dopuszczalna jest ręcznie przygotowana adnotacja korygująca pojedynczy błąd
+OCR, o ile działa wyłącznie w tymczasowym podglądzie, nie zapisuje treści
+książki w pliku `.easyreader` i nigdy nie modyfikuje źródłowego EPUB-a.
 
 ## Najważniejsza zasada
 
@@ -56,4 +60,3 @@ legalnie rozpowszechniane przykłady.
 
 Aktywna książka jest wskazana w `.easyreader/active_book.txt`. Przed działaniem
 przeczytaj jej `postep.json` i `profil_czytania.md`.
-

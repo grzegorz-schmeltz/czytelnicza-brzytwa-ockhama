@@ -25,6 +25,24 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from tests.epub_builder import CHAP2_XHTML, build_epub3  # noqa: E402
 
 
+def close_and_wait(window, timeout_ms: int = 1500) -> None:
+    """Patrz tests/smoke_test.py - closeEvent teraz odracza faktyczne
+    zamknięcie, żeby zdążyć asynchronicznie zapisać pozycję czytania."""
+    window.close()
+    loop = QEventLoop()
+
+    def _check():
+        if getattr(window, "_close_confirmed", False):
+            loop.quit()
+
+    poll = QTimer()
+    poll.timeout.connect(_check)
+    poll.start(20)
+    QTimer.singleShot(timeout_ms, loop.quit)
+    if not getattr(window, "_close_confirmed", False):
+        loop.exec()
+
+
 def main() -> int:
     import tempfile
     import zipfile
@@ -103,7 +121,7 @@ def main() -> int:
     assert "ZMODYFIKOWANA TREŚĆ" in content, "Nowa tresc powinna byc widoczna po reloadzie"
     print("[4/4] Rozdzial zachowany, nowa tresc widoczna:", window.state.current_chapter_href())
 
-    window.close()
+    close_and_wait(window)
     app.quit()
 
     print("\nTEST NA ZYWO (AUTO-RELOAD) ZAKONCZONY SUKCESEM.")

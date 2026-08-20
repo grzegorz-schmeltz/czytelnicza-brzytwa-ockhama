@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.epub_parser import EpubParseError, TocEntry
+from core.easyreader_annotations import EasyReaderAnnotationError, analyze_relink, commit_relink
 from core.notes_export import NotesExportError, export_notes_epub
 from core.preview_state import ChapterPosition, PreviewState
 from core.reload_worker import ReloadCoordinator
@@ -76,6 +77,7 @@ class MainWindow(QMainWindow):
         self.coordinator = ReloadCoordinator(self.state)
         self._pending_anchor: dict | None = None
         self._last_reading_anchor: dict | None = None
+        self._anchor_hook_call_id: int = 0
         self._is_dark_theme = False
 
         self._build_ui()
@@ -162,6 +164,10 @@ class MainWindow(QMainWindow):
         self.action_export_notes = QAction("Eksportuj notatki do EPUB…", self)
         self.action_export_notes.setEnabled(False)
         file_menu.addAction(self.action_export_notes)
+        self.action_choose_notes = QAction("Wybierz plik notatek…", self)
+        file_menu.addAction(self.action_choose_notes)
+        self.action_relink_notes = QAction("Połącz ponownie notatki z tą książką…", self)
+        file_menu.addAction(self.action_relink_notes)
         exit_action = QAction("Zakończ", self)
         exit_action.setShortcut(QKeySequence.StandardKey.Quit)
         exit_action.triggered.connect(self.close)
@@ -199,6 +205,8 @@ class MainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self.action_open.triggered.connect(self._on_open_clicked)
         self.action_export_notes.triggered.connect(self._on_export_notes)
+        self.action_choose_notes.triggered.connect(self._on_choose_notes_file)
+        self.action_relink_notes.triggered.connect(self._on_relink_notes_from_menu)
         self.action_prev.triggered.connect(self._on_prev_chapter)
         self.action_next.triggered.connect(self._on_next_chapter)
         self.action_set_marker.triggered.connect(self._set_reading_marker)
@@ -237,6 +245,16 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Błąd", "Wybrany plik nie ma rozszerzenia .epub.")
             return
 
+        # UWAGA (punkt 2 zgłoszenia): CELOWO nie sprawdzamy tu jeszcze
+        # zgodności sumy kontrolnej z kandydatem - to samo w sobie nie
+        # rozstrzyga niczego, bo i tak weryfikujemy ją niżej przez
+        # PreviewState.load_initial(), które NIE blokuje już otwarcia
+        # książki przy niezgodności (patrz `annotation_error` poniżej).
+        # Kandydat "z ostatniej sesji" jest brany pod uwagę tylko wtedy,
+        # gdy ścieżka EPUB-a dokładnie się zgadza - a i tak, jeśli treść
+        # pod tą ścieżką w międzyczasie się zmieniła (inna książka pod tą
+        # samą nazwą pliku), poniższa weryfikacja to wykryje i zaproponuje
+        # wybór właściwego pliku zamiast cichego, błędnego dopasowania.
         resolved_annotations: str | None = None
         if annotation_path:
             candidate = os.path.abspath(annotation_path)
@@ -278,6 +296,7 @@ class MainWindow(QMainWindow):
         self.coordinator = ReloadCoordinator(self.state)
         self._connect_coordinator_signals()
         self.coordinator.set_auto_reload_enabled(self.auto_reload_checkbox.isChecked())
+        resolved_annotations = self.state.annotation_path  # None, jeśli load_initial odrzuciło niezgodny plik
         extra_paths = [resolved_annotations] if resolved_annotations else []
         self.coordinator.start_watching(path, extra_paths=extra_paths)
         self.annotation_path = resolved_annotations
@@ -292,6 +311,167 @@ class MainWindow(QMainWindow):
         self.settings.setValue("last_annotation_file", resolved_annotations or "")
         self._update_marker_action()
         logger.info("Otwarto plik EPUB: %s (tytuł: %s)", path, self.state.book.title if self.state.book else "?")
+
+        if self.state.annotation_error:
+            # Notatki istniały (kandydat), ale nie pasowały do tej książki -
+            # książka jest już otwarta i w pełni użyteczna; proponujemy
+            # naprawę zamiast tylko pokazywać komunikat o błędzie.
+            self._prompt_annotation_mismatch(candidate, self.state.annotation_error)
+
+    def _prompt_annotation_mismatch(self, candidate_notes: str, reason: str) -> None:
+        """Punkt 2/3: niezgodny plik notatek nie blokuje już otwarcia książki -
+        tutaj proponujemy dalsze kroki, zamiast zostawiać czytelnika z samym
+        komunikatem o błędzie."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Notatki nie pasują do tej książki")
+        box.setText(
+            f"Plik notatek:\n{candidate_notes}\n\nnie pasuje do otwartej książki:\n{reason}\n\n"
+            "Książka jest otwarta bez notatek. Co chcesz zrobić?"
+        )
+        button_continue = box.addButton("Otwórz bez notatek", QMessageBox.ButtonRole.RejectRole)
+        button_choose = box.addButton("Wybierz plik notatek…", QMessageBox.ButtonRole.ActionRole)
+        button_relink = box.addButton("Połącz ponownie (bezpieczny relink)…", QMessageBox.ButtonRole.ActionRole)
+        box.setDefaultButton(button_continue)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is button_choose:
+            self._on_choose_notes_file()
+        elif clicked is button_relink:
+            self._on_relink_notes(candidate_notes)
+
+    def _on_choose_notes_file(self) -> None:
+        """Pozwala ręcznie wskazać plik `.easyreader` dla aktualnie otwartej książki."""
+        if not self.state.source_epub_path:
+            QMessageBox.information(self, "Notatki", "Najpierw otwórz książkę.")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Wybierz plik notatek", "", "Pliki notatek (*.easyreader)"
+        )
+        if not path:
+            return
+        if self.state.try_apply_annotations(path):
+            self._on_notes_linked(path)
+        else:
+            QMessageBox.warning(
+                self,
+                "Notatki",
+                f"Ten plik notatek również nie pasuje do otwartej książki:\n\n{self.state.annotation_error}\n\n"
+                "Możesz spróbować bezpiecznego ponownego powiązania z menu „Plik”.",
+            )
+
+    def _on_relink_notes_from_menu(self) -> None:
+        """Wywoływane z menu "Plik" (poza dialogiem niezgodności) - ustala,
+        który plik notatek ma zostać poddany bezpiecznemu relinkowi."""
+        if not self.state.source_epub_path:
+            QMessageBox.information(self, "Relink", "Najpierw otwórz książkę.")
+            return
+        candidate = self.annotation_path or (
+            os.path.splitext(self.state.source_epub_path)[0] + ".easyreader"
+        )
+        if not os.path.isfile(candidate):
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Wybierz plik notatek do połączenia", "", "Pliki notatek (*.easyreader)"
+            )
+            if not path:
+                return
+            candidate = path
+        self._on_relink_notes(candidate)
+
+    def _on_relink_notes(self, candidate_notes: str) -> None:
+        """Punkt 3/4/6: bezpieczne, transakcyjne ponowne powiązanie - pokazuje
+        pełny raport zgodności i aktualizuje powiązanie DOPIERO po wyraźnym
+        potwierdzeniu użytkownika. `commit_relink` samo tworzy kopię
+        bezpieczeństwa i nie modyfikuje oryginalnego pliku, jeśli próbne
+        nałożenie notatek na nową wersję książki się nie powiedzie."""
+        if not self.state.book or not self.state.source_epub_path or not self.state.current_temp_dir:
+            QMessageBox.information(self, "Relink", "Najpierw otwórz książkę.")
+            return
+        try:
+            report = analyze_relink(
+                candidate_notes,
+                self.state.source_epub_path,
+                self.state.current_temp_dir,
+                new_book_title=self.state.book.title,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Nie udało się przeanalizować pliku notatek do relinku: %s", candidate_notes)
+            QMessageBox.critical(self, "Relink", f"Nie można odczytać pliku notatek:\n\n{exc}")
+            return
+
+        # Punkt 6: liczba dopasowań pewnych/niedopasowanych, wykorzystane
+        # poziomy dopasowania oraz jawne ostrzeżenie o zmianie powiązania.
+        title_sim = report["title_similarity"]
+        title_text = f"{title_sim:.0%}" if title_sim is not None else "nie można porównać"
+        tiers_text = (
+            ", ".join(f"{name}: {count}" for name, count in report["tiers_used"].items())
+            if report["tiers_used"] else "brak"
+        )
+        summary = (
+            f"Dopasowania pewne: {report['matched']} z {report['total']} adnotacji ({report['ratio']:.0%}).\n"
+            f"Niedopasowane: {report['unmatched']}.\n"
+            f"Wykorzystane poziomy dopasowania: {tiers_text}.\n"
+            f"Podobieństwo tytułu: {title_text}.\n\n"
+            f"{report['recommendation_reason']}\n\n"
+            "UWAGA: ponowne powiązanie zmieni, do której książki przypisany jest ten plik notatek "
+            "(zostanie zapisana kopia bezpieczeństwa przed zmianą)."
+        )
+
+        answer = QMessageBox.question(
+            self,
+            "Potwierdź ponowne powiązanie",
+            summary + "\n\nZaktualizować powiązanie notatek z tą książką?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            result = commit_relink(
+                candidate_notes,
+                self.state.source_epub_path,
+                self.state.current_temp_dir,
+                new_title=self.state.book.title,
+            )
+        except EasyReaderAnnotationError as exc:
+            # Punkt 4: nieudana próba nie modyfikuje oryginalnego pliku notatek.
+            QMessageBox.warning(
+                self,
+                "Relink",
+                f"Bezpieczny relink nie powiódł się:\n\n{exc}\n\n"
+                "Oryginalny plik notatek NIE został zmieniony.",
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Nieoczekiwany błąd podczas relinku: %s", candidate_notes)
+            QMessageBox.critical(self, "Relink", f"Nieoczekiwany błąd:\n\n{exc}")
+            return
+
+        # `commit_relink` już nałożyło notatki na rozpakowany podgląd jako
+        # część próby transakcyjnej (patrz jego docstring) - NIE wywołujemy
+        # tu ponownie `try_apply_annotations`, żeby nie wstawić adnotacji
+        # po raz drugi do tego samego, już zmodyfikowanego pliku rozdziału.
+        self.state.annotation_path = candidate_notes
+        self.state.annotation_error = None
+        self.state.annotation_skipped = result["apply_report"]["skipped"]
+        self._on_notes_linked(candidate_notes)
+
+        skipped_count = len(result["apply_report"]["skipped"])
+        note = f" ({skipped_count} adnotacji pominięto - patrz dziennik)" if skipped_count else ""
+        QMessageBox.information(
+            self,
+            "Relink",
+            f"Notatki zostały ponownie połączone z książką.{note}\n\nKopia bezpieczeństwa: {result['backup_path']}",
+        )
+
+    def _on_notes_linked(self, notes_path: str) -> None:
+        """Odświeża UI po tym, jak notatki zostały pomyślnie (ponownie) powiązane."""
+        self.annotation_path = notes_path
+        self.action_export_notes.setEnabled(True)
+        self.settings.setValue("last_annotation_file", notes_path)
+        self.coordinator.start_watching(self.state.source_epub_path, extra_paths=[notes_path])
+        self._display_current_chapter()
 
     def _on_export_notes(self) -> None:
         if not self.annotation_path:
@@ -457,7 +637,22 @@ class MainWindow(QMainWindow):
         asynchronicznego `runJavaScript()` (funkcja `capture_reading_anchor`
         korzysta z callbacku), zanim przeładowanie faktycznie ruszy - stąd
         `proceed()` jest wywoływane dopiero z tego callbacku, a nie od razu.
+
+        Punkt 6 (starsze generacje nie mogą nadpisać nowszej pozycji):
+        `ReloadCoordinator` już chroni przed uruchomieniem DWÓCH wątków
+        przeładowania naraz (licznik generacji), ale samo to wywołanie
+        haka może zostać "przeterminowane" wcześniej, niż jego własny,
+        wciąż oczekujący callback JS zdąży się wykonać - np. gdy w
+        międzyczasie użytkownik kliknie "Przeładuj teraz" i uruchomi
+        NOWSZE wywołanie haka. Bez poniższego znacznika `call_id`, spóźniony
+        callback STAREGO wywołania nadpisałby `_pending_anchor` już
+        NIEAKTUALNĄ kotwicą, mimo że nowsze wywołanie zdążyło już zapisać
+        świeższą. Dlatego każde wywołanie haka dostaje własny, rosnący
+        identyfikator, i tylko NAJŚWIEŻSZE z nich wolno zapisywać stan.
         """
+        self._anchor_hook_call_id = getattr(self, "_anchor_hook_call_id", 0) + 1
+        call_id = self._anchor_hook_call_id
+
         self.status_reload_time.setText("Przeładowywanie…")
         # Zachowaj ostatnią poprawną kotwicę jako zabezpieczenie. WebEngine
         # może sporadycznie nie zwrócić wyniku JavaScript przed limitem
@@ -472,7 +667,11 @@ class MainWindow(QMainWindow):
                 proceed()
 
         def _on_anchor_captured(anchor) -> None:
-            if isinstance(anchor, dict):
+            # Jeśli w międzyczasie wystartowało NOWSZE wywołanie haka (inny
+            # call_id), ten callback jest przeterminowany - nie wolno mu
+            # już nadpisywać `_pending_anchor`/`_last_reading_anchor`, bo
+            # nowsze wywołanie mogło już zapisać świeższą kotwicę.
+            if isinstance(anchor, dict) and call_id == self._anchor_hook_call_id:
                 self._pending_anchor = anchor
                 self._last_reading_anchor = anchor
                 self._store_reading_marker(anchor, automatic=True)
@@ -511,11 +710,14 @@ class MainWindow(QMainWindow):
     def _update_status_bar(self, reload_time: datetime | None = "unset") -> None:
         if self.state.source_epub_path:
             self.status_filename.setText(os.path.basename(self.state.source_epub_path))
-        self.status_annotations.setText(
-            f"Notatki: {os.path.basename(self.annotation_path)}"
-            if self.annotation_path
-            else "Notatki: brak"
-        )
+        skipped = len(self.state.annotation_skipped) if self.state.annotation_skipped else 0
+        if self.annotation_path and skipped:
+            annotations_text = f"Notatki: {os.path.basename(self.annotation_path)} ({skipped} pominiętych)"
+        elif self.annotation_path:
+            annotations_text = f"Notatki: {os.path.basename(self.annotation_path)}"
+        else:
+            annotations_text = "Notatki: brak"
+        self.status_annotations.setText(annotations_text)
         if self.state.book and self.state.book.spine:
             idx = self.state.current_spine_index + 1
             total = len(self.state.book.spine)
@@ -593,25 +795,34 @@ class MainWindow(QMainWindow):
         self.settings.setValue(f"books/{key}/last_chapter_href", href)
         self.settings.sync()
 
-    def _save_precise_reading_position(self) -> None:
-        """Okresowo zapisuje widoczny akapit jako trwałą zakładkę książki."""
+    def _save_precise_reading_position(self, on_done=None) -> None:
+        """Okresowo zapisuje widoczny akapit jako trwałą zakładkę książki.
+
+        `on_done` (opcjonalnie) jest wywoływane PO zakończeniu zapisu (albo
+        od razu, jeśli nie ma czego zapisywać) - używane przy zamykaniu
+        programu, żeby poczekać na wynik asynchronicznego `runJavaScript()`
+        zamiast zamykać okno (i niszczyć WebEngine) zanim zapis się wykona.
+        """
         path = self.state.source_epub_path
         href = self.state.current_chapter_href()
         if not path or not href:
+            if on_done:
+                on_done()
             return
 
         key = self._book_settings_key(path)
 
         def _store(anchor) -> None:
-            if not isinstance(anchor, dict):
-                return
-            payload = {"chapter_href": href, "anchor": anchor}
-            self.settings.setValue(
-                f"books/{key}/reading_anchor",
-                json.dumps(payload, ensure_ascii=False),
-            )
-            self.settings.setValue(f"books/{key}/last_chapter_href", href)
-            self.settings.sync()
+            if isinstance(anchor, dict):
+                payload = {"chapter_href": href, "anchor": anchor}
+                self.settings.setValue(
+                    f"books/{key}/reading_anchor",
+                    json.dumps(payload, ensure_ascii=False),
+                )
+                self.settings.setValue(f"books/{key}/last_chapter_href", href)
+                self.settings.sync()
+            if on_done:
+                on_done()
 
         self.web_view.capture_reading_anchor(_store)
 
@@ -718,13 +929,37 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def closeEvent(self, event) -> None:
-        logger.info("Zamykanie aplikacji - zatrzymywanie obserwatora i sprzątanie katalogów tymczasowych.")
+        if getattr(self, "_close_confirmed", False):
+            logger.info("Zamykanie aplikacji - zatrzymywanie obserwatora i sprzątanie katalogów tymczasowych.")
+            self.coordinator.stop_watching()
+            self.state.cleanup()
+            super().closeEvent(event)
+            return
+
+        # Punkt 5: zapis okresowy (co 2s) mógł nie zdążyć złapać ostatnich
+        # kilku sekund czytania. `capture_reading_anchor()` jest asynchroniczne
+        # (runJavaScript z callbackiem) - gdybyśmy pozwolili oknu zamknąć się
+        # od razu, WebEngine zostałby zniszczony zanim callback zdąży
+        # wystartować, i zapis by przepadł. Zamiast tego WSTRZYMUJEMY
+        # zamknięcie (event.ignore()), czekamy na wynik zapisu (z krótkim
+        # limitem czasu na wypadek, gdyby JS nigdy nie odpowiedział), a
+        # dopiero potem zamykamy okno naprawdę.
+        event.ignore()
         self._reading_position_timer.stop()
         self._save_book_position()
-        self._save_settings()
-        self.coordinator.stop_watching()
-        self.state.cleanup()
-        super().closeEvent(event)
+
+        state = {"done": False}
+
+        def _finish_close() -> None:
+            if state["done"]:
+                return
+            state["done"] = True
+            self._close_confirmed = True
+            self._save_settings()
+            self.close()
+
+        QTimer.singleShot(800, _finish_close)
+        self._save_precise_reading_position(on_done=_finish_close)
 
     def _show_about(self) -> None:
         description = (

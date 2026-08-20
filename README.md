@@ -17,18 +17,28 @@ wybranymi fragmentami może wyświetlać wyraźnie oznaczone:
 ## Bezpieczny zakres
 
 To jest wyłącznie projekt czytelniczy i edukacyjny. Nie zawiera edytora EPUB,
-trybu autora, OCR, obsługi kamery ani narzędzi do składania książek.
+trybu autora, silnika OCR, obsługi kamery ani narzędzi do składania książek.
+Może wyświetlać ręcznie przygotowaną korektę drobnego błędu OCR jako osobną
+adnotację, ale nie zmienia w tym celu książki źródłowej.
 
 Oryginalny EPUB pozostaje nietknięty i jest otwierany tylko do odczytu.
-Opracowania trafiają do niewielkiego pliku `*.easyreader`, który nie zawiera
-pełnej treści książki. Połączony podgląd powstaje wyłącznie w katalogu
-tymczasowym i jest usuwany po zamknięciu programu.
+Viewer potrafi nakładać opracowania z niewielkiego pliku `*.easyreader`, który
+nie zawiera pełnej treści książki. Połączony podgląd powstaje wyłącznie w
+katalogu tymczasowym i jest usuwany po zamknięciu programu.
 
 ## Stan projektu
 
-To wczesna wersja do lokalnych testów na Windowsie. Obsługuje EPUB i TXT.
+To eksperymentalna wersja **alpha** do lokalnych testów na Windowsie. Interfejs
+i format danych mogą się jeszcze zmieniać. Program obsługuje EPUB i TXT.
 PDF może zostać przekształcony do prywatnego EPUB-a za pomocą Calibre.
 Warstwa AI nie jest zaszyta w aplikacji i nie wymaga wspólnego klucza API.
+
+### Znane ograniczenie wersji alpha
+
+Viewer i format zewnętrznych notatek `.easyreader` są już obsługiwane, ale
+narzędzie wiersza poleceń `tools/easyreader.py` nadal używa starszego modelu:
+tworzy oddzielną kopię roboczą EPUB-a i pracuje na niej. Nigdy nie nadpisuje
+źródłowej książki, jednak oba przepływy nie są jeszcze w pełni połączone.
 
 ## Instalacja
 
@@ -60,8 +70,10 @@ Można używać zwykłych poleceń:
 - „Zastosuj”.
 - „Pomiń”.
 
-Asystent zapisuje propozycję w `temp/opracowanie.json`, a zaakceptowane
-opracowanie w osobnym pliku `.easyreader`. Nigdy nie zmienia źródłowego EPUB-a.
+Asystent zapisuje propozycję w `temp/opracowanie.json`. Obecny przepływ CLI
+stosuje zaakceptowane opracowanie do oddzielnej kopii roboczej EPUB-a; viewer
+może niezależnie korzystać z pliku `.easyreader`. Żaden z tych przepływów nie
+zmienia źródłowego EPUB-a.
 
 ## Funkcje czytnika
 
@@ -70,7 +82,9 @@ opracowanie w osobnym pliku `.easyreader`. Nigdy nie zmienia źródłowego EPUB-
 - zapamiętywanie rozdziału i dokładnego miejsca czytania;
 - ręczny znacznik czytania oraz przycisk powrotu do ostatniego znacznika;
 - automatyczne zachowanie znacznika przed przeładowaniem objaśnień;
-- bezpieczne przeładowanie notatek;
+- bezpieczne przeładowanie notatek i pomijanie niepewnych dopasowań;
+- kontrolowane ponowne powiązanie notatek z kopią bezpieczeństwa;
+- ręczne korekty drobnych błędów OCR nakładane wyłącznie w podglądzie;
 - eksport samych notatek do oddzielnego EPUB-a, bez tekstu książki.
 
 ## Prywatność
